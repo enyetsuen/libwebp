@@ -86,11 +86,16 @@ static int ReadPicture(const char* const filename, WebPPicture* const pic,
     ok = ImgIoUtilReadFile(filename, &data, &data_size);
     ok = ok && ReadYUV(data, data_size, pic);
   } else {
-    // If no size specified, try to decode it using WIC.
-    ok = ReadPictureWithWIC(filename, pic, keep_alpha, metadata);
+    const int from_stdin = (filename == NULL) || !WSTRCMP(filename, "-");
+    if (!from_stdin) {
+      ok = ReadPictureWithWIC(filename, pic, keep_alpha, metadata);
+    }
     if (!ok) {
       ok = ImgIoUtilReadFile(filename, &data, &data_size);
-      ok = ok && ReadWebP(data, data_size, pic, keep_alpha, metadata);
+      if (ok) {
+        WebPImageReader reader = WebPGuessImageReader(data, data_size);
+        ok = reader(data, data_size, pic, keep_alpha, metadata);
+      }
     }
   }
   if (!ok) {
@@ -990,6 +995,8 @@ int main(int argc, const char* argv[]) {
     } else if (!strcmp(argv[c], "--")) {
       if (c + 1 < argc) in_file = (const char*)GET_WARGV(argv, ++c);
       break;
+    } else if (!strcmp(argv[c], "-")) {
+      in_file = (const char*)GET_WARGV(argv, c);
     } else if (argv[c][0] == '-') {
       fprintf(stderr, "Error! Unknown option '%s'\n", argv[c]);
       HelpLong();
