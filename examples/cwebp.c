@@ -656,7 +656,9 @@ static void HelpLong(void) {
       "                           hexadecimal, e.g. 0xc0e0d0 for red=0xc0\n"
       "                           green=0xe0 and blue=0xd0\n");
   printf("  -noalpha ............... discard any transparency information\n");
-  printf("  -lossless .............. encode image losslessly, default=off\n");
+  printf(
+      "  -lossless .............. encode image losslessly, default=off\n"
+      "                           (see -exact for transparent pixels)\n");
   printf(
       "  -near_lossless <int> ... use near-lossless image preprocessing\n"
       "                           (0..100=off), default=100\n");
@@ -915,7 +917,7 @@ int main(int argc, const char* argv[]) {
       printf("%d.%d.%d\n", (version >> 16) & 0xff, (version >> 8) & 0xff,
              version & 0xff);
       printf("libsharpyuv: %d.%d.%d\n", (sharpyuv_version >> 24) & 0xff,
-             (sharpyuv_version >> 16) & 0xffff, sharpyuv_version & 0xff);
+             (sharpyuv_version >> 16) & 0xff, sharpyuv_version & 0xffff);
       FREE_WARGV_AND_RETURN(EXIT_SUCCESS);
     } else if (!strcmp(argv[c], "-progress")) {
       show_progress = 1;
@@ -1156,12 +1158,14 @@ int main(int argc, const char* argv[]) {
 
       if (!WebPPictureRescale(&picture_no_alpha, resize_w, resize_h)) {
         fprintf(stderr, "Error! Cannot resize temporary picture\n");
+        WebPPictureFree(&picture_no_alpha);
         goto Error;
       }
     }
 
     if (!WebPPictureRescale(&picture, resize_w, resize_h)) {
       fprintf(stderr, "Error! Cannot resize picture\n");
+      if (config.exact) WebPPictureFree(&picture_no_alpha);
       goto Error;
     }
 

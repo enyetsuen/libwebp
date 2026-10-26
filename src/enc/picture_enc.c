@@ -48,6 +48,45 @@ int WebPPictureInitInternal(WebPPicture* picture, int version) {
 
 //------------------------------------------------------------------------------
 
+#ifndef PTRDIFF_MAX
+#define PTRDIFF_MAX ((ptrdiff_t)(~(size_t)0 >> 1))
+#endif
+#ifndef UINTPTR_MAX
+#define UINTPTR_MAX ((uintptr_t)-1)
+#endif
+
+// Returns 1 if 'ptr' is NULL, or if its stride and memory bounds are valid for
+// a plane of size width x height with 'step' bytes per pixel, 0 otherwise.
+static int CheckMemoryBounds(const void* ptr, int stride, int step, int width,
+                             int height) {
+  uint64_t abs_stride, row_span, width_bytes, total_bytes;
+  uintptr_t addr;
+
+  if (ptr == NULL) return 1;
+  if (width <= 0 || height <= 0 || step <= 0) return 0;
+  if (stride > INT_MAX / step || stride < -INT_MAX / step) return 0;
+  stride *= step;
+  if (!CheckStride(stride, step, width)) return 0;
+
+  abs_stride = (stride < 0) ? (uint64_t)-(int64_t)stride : (uint64_t)stride;
+  row_span = (uint64_t)(height - 1) * abs_stride;
+  width_bytes = (uint64_t)width * (uint64_t)step;
+
+  // Check that the total plane size fits in addressable limits (PTRDIFF_MAX).
+  if (row_span > (uint64_t)PTRDIFF_MAX - width_bytes) return 0;
+
+  total_bytes = row_span + width_bytes;
+  addr = (uintptr_t)ptr;
+
+  if (stride >= 0) {
+    if (addr > (uintptr_t)UINTPTR_MAX - (uintptr_t)total_bytes) return 0;
+  } else {
+    if (addr < (uintptr_t)row_span) return 0;
+    if (addr > (uintptr_t)UINTPTR_MAX - (uintptr_t)width_bytes) return 0;
+  }
+  return 1;
+}
+
 int WebPValidatePicture(const WebPPicture* const picture) {
   if (picture == NULL) return 0;
   if (picture->width <= 0 || picture->width > INT_MAX / 4 ||
@@ -57,6 +96,47 @@ int WebPValidatePicture(const WebPPicture* const picture) {
   if (picture->colorspace != WEBP_YUV420 &&
       picture->colorspace != WEBP_YUV420A) {
     return WebPEncodingSetError(picture, VP8_ENC_ERROR_INVALID_CONFIGURATION);
+  }
+  // If buffers are provided, validate their strides and memory bounds.
+  if (picture->use_argb) {
+    if (!CheckMemoryBounds(picture->argb, picture->argb_stride,
+                           (int)sizeof(*picture->argb), picture->width,
+                           picture->height)) {
+      return WebPEncodingSetError(picture, VP8_ENC_ERROR_BAD_DIMENSION);
+    }
+  } else {
+    // If YUV planes are provided, validate Y, U/V (subsampled by 2 in each
+    // dimension for YUV420), and alpha strides and check that each plane fits
+    // in memory.
+    const int uv_width = (picture->width + 1) >> 1;
+    const int uv_height = (picture->height + 1) >> 1;
+    if (!CheckMemoryBounds(picture->y, picture->y_stride, /*step=*/1,
+                           picture->width, picture->height) ||
+        !CheckMemoryBounds(picture->u, picture->uv_stride, /*step=*/1, uv_width,
+                           uv_height) ||
+        !CheckMemoryBounds(picture->v, picture->uv_stride, /*step=*/1, uv_width,
+                           uv_height) ||
+        !CheckMemoryBounds(picture->a, picture->a_stride, /*step=*/1,
+                           picture->width, picture->height)) {
+      return WebPEncodingSetError(picture, VP8_ENC_ERROR_BAD_DIMENSION);
+    }
+  }
+  return 1;
+}
+
+int WebPValidateAllocatedPicture(const WebPPicture* const picture) {
+  if (!WebPValidatePicture(picture)) return 0;
+  if (picture->use_argb) {
+    if (picture->argb == NULL) {
+      return WebPEncodingSetError(picture, VP8_ENC_ERROR_NULL_PARAMETER);
+    }
+  } else {
+    if (picture->y == NULL || picture->u == NULL || picture->v == NULL) {
+      return WebPEncodingSetError(picture, VP8_ENC_ERROR_NULL_PARAMETER);
+    }
+    if ((picture->colorspace & WEBP_CSP_ALPHA_BIT) && picture->a == NULL) {
+      return WebPEncodingSetError(picture, VP8_ENC_ERROR_NULL_PARAMETER);
+    }
   }
   return 1;
 }
@@ -81,14 +161,19 @@ void WebPPictureResetBuffers(WebPPicture* const picture) {
 
 int WebPPictureAllocARGB(WebPPicture* const picture) {
   void* memory;
-  const int width = picture->width;
-  const int height = picture->height;
-  const uint64_t argb_size = (uint64_t)width * height;
+  int width, height;
+  uint64_t argb_size;
 
-  if (!WebPValidatePicture(picture)) return 0;
+  assert(picture != NULL);
 
   WebPSafeFree(picture->memory_argb_);
   WebPPictureResetBufferARGB(picture);
+
+  if (!WebPValidatePicture(picture)) return 0;
+
+  width = picture->width;
+  height = picture->height;
+  argb_size = (uint64_t)width * height;
 
   // allocate a new buffer.
   memory = WebPSafeMalloc(argb_size + WEBP_ALIGN_CST, sizeof(*picture->argb));
@@ -102,22 +187,25 @@ int WebPPictureAllocARGB(WebPPicture* const picture) {
 }
 
 int WebPPictureAllocYUVA(WebPPicture* const picture) {
-  const int has_alpha = (int)picture->colorspace & WEBP_CSP_ALPHA_BIT;
-  const int width = picture->width;
-  const int height = picture->height;
-  const int y_stride = width;
-  const int uv_width = (int)(((int64_t)width + 1) >> 1);
-  const int uv_height = (int)(((int64_t)height + 1) >> 1);
-  const int uv_stride = uv_width;
+  int has_alpha, width, height, y_stride, uv_width, uv_height, uv_stride;
   int a_width, a_stride;
   uint64_t y_size, uv_size, a_size, total_size;
   uint8_t* mem;
 
-  if (!WebPValidatePicture(picture)) return 0;
+  assert(picture != NULL);
 
   WebPSafeFree(picture->memory_);
   WebPPictureResetBufferYUVA(picture);
 
+  if (!WebPValidatePicture(picture)) return 0;
+
+  has_alpha = (int)picture->colorspace & WEBP_CSP_ALPHA_BIT;
+  width = picture->width;
+  height = picture->height;
+  y_stride = width;
+  uv_width = (width + 1) >> 1;
+  uv_height = (height + 1) >> 1;
+  uv_stride = uv_width;
   // alpha
   a_width = has_alpha ? width : 0;
   a_stride = a_width;

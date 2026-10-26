@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -42,14 +43,13 @@ struct FrameConfig {
 };
 
 auto ArbitraryKMinKMax() {
-  return fuzztest::FlatMap(
-      [](int kmax) {
-        const int min_kmin = (kmax > 1) ? (kmax / 2) : 0;
-        const int max_kmin = (kmax > 1) ? (kmax - 1) : 0;
-        return fuzztest::PairOf(fuzztest::InRange(min_kmin, max_kmin),
-                                fuzztest::Just(kmax));
-      },
-      fuzztest::InRange(0, 15));
+  return fuzztest::PairOf(
+      fuzztest::OneOf(fuzztest::InRange(std::numeric_limits<int>::min(),
+                                        std::numeric_limits<int>::max()),
+                      fuzztest::InRange(0, 15)),
+      fuzztest::OneOf(fuzztest::InRange(std::numeric_limits<int>::min(),
+                                        std::numeric_limits<int>::max()),
+                      fuzztest::InRange(2, 15)));
 }
 
 int AddFrame(WebPAnimEncoder** const enc,
@@ -92,6 +92,10 @@ int AddFrame(WebPAnimEncoder** const enc,
     *height = pic.height;
     *enc = WebPAnimEncoderNew(*width, *height, &anim_config);
     if (*enc == nullptr) {
+      if (getenv("NALLOC_FUZZ_VERSION") == nullptr) {
+        fprintf(stderr, "WebPAnimEncoderNew failed.\n");
+        std::abort();
+      }
       return 0;
     }
   }
@@ -285,4 +289,47 @@ TEST(AnimIndexEncoder, ExtremeNegativeKmin) {
     EXPECT_TRUE(WebPAnimEncoderAssemble(enc.get(), &data));
     WebPDataClear(&data);
   }
+}
+
+// WebPAnimEncoderAssemble() flushes all frames: adding frames afterwards must
+// be rejected instead of accessing the (now empty) frame cache.
+TEST(AnimIndexEncoder, AddAfterAssemble) {
+  constexpr int kSize = 16;
+  const std::unique_ptr<WebPAnimEncoder, decltype(&WebPAnimEncoderDelete)> enc(
+      WebPAnimEncoderNew(kSize, kSize, nullptr), WebPAnimEncoderDelete);
+  ASSERT_NE(enc.get(), nullptr);
+  WebPConfig config;
+  ASSERT_TRUE(WebPConfigInit(&config));
+  config.lossless = 1;
+  config.method = 0;
+  WebPPicture pic;
+  ASSERT_TRUE(WebPPictureInit(&pic));
+  pic.use_argb = 1;
+  pic.width = kSize;
+  pic.height = kSize;
+  ASSERT_TRUE(WebPPictureAlloc(&pic));
+  for (int i = 0; i < 2; ++i) {
+    for (int p = 0; p < kSize * kSize; ++p) {
+      pic.argb[(p / kSize) * pic.argb_stride + (p % kSize)] =
+          0xff000000u | ((p * 2654435761u + i * 40503u) & 0xffffffu);
+    }
+    EXPECT_TRUE(WebPAnimEncoderAdd(enc.get(), &pic, i * 40, &config));
+  }
+  WebPData data;
+  WebPDataInit(&data);
+  ASSERT_TRUE(WebPAnimEncoderAssemble(enc.get(), &data));
+  const std::vector<uint8_t> assembled(data.bytes, data.bytes + data.size);
+  WebPDataClear(&data);
+
+  EXPECT_FALSE(WebPAnimEncoderAdd(enc.get(), &pic, 80, &config));
+  EXPECT_EQ(pic.error_code, VP8_ENC_ERROR_INVALID_CONFIGURATION);
+  EXPECT_FALSE(WebPAnimEncoderAdd(enc.get(), nullptr, 120, nullptr));
+  EXPECT_STRNE(WebPAnimEncoderGetError(enc.get()), "");
+  WebPPictureFree(&pic);
+
+  // The already assembled animation is still available.
+  ASSERT_TRUE(WebPAnimEncoderAssemble(enc.get(), &data));
+  EXPECT_EQ(std::vector<uint8_t>(data.bytes, data.bytes + data.size),
+            assembled);
+  WebPDataClear(&data);
 }

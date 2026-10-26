@@ -23,9 +23,9 @@
 #include "src/utils/utils.h"
 #include "src/webp/types.h"
 
-typedef double (*AccumulateFunc)(const uint8_t* src, int src_stride,
-                                 const uint8_t* ref, int ref_stride, int w,
-                                 int h);
+typedef double (*AccumulateFunc)(const uint8_t* src, ptrdiff_t src_stride,
+                                 const uint8_t* ref, ptrdiff_t ref_stride,
+                                 int w, int h);
 
 //------------------------------------------------------------------------------
 // local-min distortion
@@ -35,8 +35,9 @@ typedef double (*AccumulateFunc)(const uint8_t* src, int src_stride,
 
 #define RADIUS 2  // search radius. Shouldn't be too large.
 
-static double AccumulateLSIM(const uint8_t* src, int src_stride,
-                             const uint8_t* ref, int ref_stride, int w, int h) {
+static double AccumulateLSIM(const uint8_t* src, ptrdiff_t src_stride,
+                             const uint8_t* ref, ptrdiff_t ref_stride, int w,
+                             int h) {
   int x, y;
   double total_sse = 0.;
   for (y = 0; y < h; ++y) {
@@ -63,8 +64,9 @@ static double AccumulateLSIM(const uint8_t* src, int src_stride,
 }
 #undef RADIUS
 
-static double AccumulateSSE(const uint8_t* src, int src_stride,
-                            const uint8_t* ref, int ref_stride, int w, int h) {
+static double AccumulateSSE(const uint8_t* src, ptrdiff_t src_stride,
+                            const uint8_t* ref, ptrdiff_t ref_stride, int w,
+                            int h) {
   int y;
   double total_sse = 0.;
   for (y = 0; y < h; ++y) {
@@ -77,8 +79,9 @@ static double AccumulateSSE(const uint8_t* src, int src_stride,
 
 //------------------------------------------------------------------------------
 
-static double AccumulateSSIM(const uint8_t* src, int src_stride,
-                             const uint8_t* ref, int ref_stride, int w, int h) {
+static double AccumulateSSIM(const uint8_t* src, ptrdiff_t src_stride,
+                             const uint8_t* ref, ptrdiff_t ref_stride, int w,
+                             int h) {
   const int w0 = (w < VP8_SSIM_KERNEL) ? w : VP8_SSIM_KERNEL;
   const int w1 = w - VP8_SSIM_KERNEL - 1;
   const int h0 = (h < VP8_SSIM_KERNEL) ? h : VP8_SSIM_KERNEL;
@@ -95,8 +98,10 @@ static double AccumulateSSIM(const uint8_t* src, int src_stride,
       sum += VP8SSIMGetClipped(src, src_stride, ref, ref_stride, x, y, w, h);
     }
     for (; x < w1; ++x) {
-      const int off1 = x - VP8_SSIM_KERNEL + (y - VP8_SSIM_KERNEL) * src_stride;
-      const int off2 = x - VP8_SSIM_KERNEL + (y - VP8_SSIM_KERNEL) * ref_stride;
+      const ptrdiff_t off1 =
+          (x - VP8_SSIM_KERNEL) + (y - VP8_SSIM_KERNEL) * src_stride;
+      const ptrdiff_t off2 =
+          (x - VP8_SSIM_KERNEL) + (y - VP8_SSIM_KERNEL) * ref_stride;
       sum += VP8SSIMGet(src + off1, src_stride, ref + off2, ref_stride);
     }
     for (; x < w; ++x) {
@@ -136,8 +141,9 @@ int WebPPlaneDistortion(const uint8_t* src, size_t src_stride,
                                 : (type == 1) ? AccumulateSSIM
                                               : AccumulateLSIM;
   if (src == NULL || ref == NULL || width <= 0 || height <= 0 || x_step == 0 ||
-      src_stride < x_step * width || ref_stride < x_step * width ||
-      result == NULL || distortion == NULL) {
+      src_stride / (size_t)width < x_step ||
+      ref_stride / (size_t)width < x_step || result == NULL ||
+      distortion == NULL) {
     return 0;
   }
 
@@ -153,8 +159,8 @@ int WebPPlaneDistortion(const uint8_t* src, size_t src_stride,
     tmp2 = tmp1 + (size_t)width * height;
     for (y = 0; y < height; ++y) {
       for (x = 0; x < width; ++x) {
-        tmp1[x + y * width] = src[x * x_step + y * src_stride];
-        tmp2[x + y * width] = ref[x * x_step + y * ref_stride];
+        tmp1[x + (size_t)y * width] = src[x * x_step + y * src_stride];
+        tmp2[x + (size_t)y * width] = ref[x * x_step + y * ref_stride];
       }
     }
     src = tmp1;
@@ -162,8 +168,8 @@ int WebPPlaneDistortion(const uint8_t* src, size_t src_stride,
     ref = tmp2;
     ref_stride = width;
   }
-  *distortion =
-      (float)metric(src, (int)src_stride, ref, (int)ref_stride, width, height);
+  *distortion = (float)metric(src, (ptrdiff_t)src_stride, ref,
+                              (ptrdiff_t)ref_stride, width, height);
   WebPSafeFree(allocated);
 
   *result = (type == 1) ? (float)GetLogSSIM(*distortion, (double)width * height)
@@ -198,6 +204,7 @@ int WebPPictureDistortion(const WebPPicture* src, const WebPPicture* ref,
   // We always measure distortion in ARGB space.
   if (p0.use_argb == 0 && !WebPPictureYUVAToARGB(&p0)) goto Error;
   if (p1.use_argb == 0 && !WebPPictureYUVAToARGB(&p1)) goto Error;
+  if (p0.argb_stride < w || p1.argb_stride < w) goto Error;
   for (c = 0; c < 4; ++c) {
     float distortion;
     const size_t stride0 = 4 * (size_t)p0.argb_stride;
